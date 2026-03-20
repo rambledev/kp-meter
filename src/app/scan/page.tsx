@@ -111,14 +111,14 @@ interface CameraModalProps {
 
 function CameraModal({ onCapture, onClose }: CameraModalProps) {
   const videoRef     = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const streamRef    = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [ready, setReady]                   = useState(false);
+  const [ready, setReady]                     = useState(false);
   const [permissionError, setPermissionError] = useState("");
   const [useInputFallback, setUseInputFallback] = useState(false);
 
   useEffect(() => {
-    // Chrome iOS ไม่รองรับ getUserMedia → fallback ทันที
     const supported =
       typeof navigator !== "undefined" &&
       !!navigator.mediaDevices?.getUserMedia;
@@ -151,7 +151,6 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
             "หรือกดปุ่ม 'เลือกรูปจากคลัง' แทน"
           );
         } else {
-          // NotFoundError หรือ error อื่น → fallback
           setUseInputFallback(true);
         }
       }
@@ -163,7 +162,6 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
     };
   }, []);
 
-  // เปิด input อัตโนมัติเมื่อ fallback พร้อม
   useEffect(() => {
     if (useInputFallback) {
       const t = setTimeout(() => fileInputRef.current?.click(), 150);
@@ -171,13 +169,59 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
     }
   }, [useInputFallback]);
 
+  // ถ่ายภาพ + crop ในกรอบทันที
   const handleCapture = useCallback(() => {
-    const video = videoRef.current;
-    if (!video || !ready) return;
+    const video     = videoRef.current;
+    const container = containerRef.current;
+    if (!video || !container || !ready) return;
+
+    const cW = container.clientWidth;
+    const cH = container.clientHeight;
+
+    // ขนาด video จริงที่แสดงบน container (object-cover)
+    const videoAspect     = video.videoWidth / video.videoHeight;
+    const containerAspect = cW / cH;
+
+    let displayW: number, displayH: number, offsetX: number, offsetY: number;
+
+    if (videoAspect > containerAspect) {
+      // video กว้างกว่า → ถูก clip ซ้าย/ขวา
+      displayH = cH;
+      displayW = cH * videoAspect;
+      offsetX  = (cW - displayW) / 2;
+      offsetY  = 0;
+    } else {
+      // video สูงกว่า → ถูก clip บน/ล่าง
+      displayW = cW;
+      displayH = cW / videoAspect;
+      offsetX  = 0;
+      offsetY  = (cH - displayH) / 2;
+    }
+
+    // ตำแหน่งกรอบ viewfinder บน container
+    const frameW    = cW * FRAME_W_RATIO;
+    const frameH    = cH * FRAME_H_RATIO;
+    const frameLeft = (cW - frameW) / 2;
+    const frameTop  = (cH - frameH) / 2;
+
+    // แปลงพิกัดกรอบ → พิกัดบน video จริง
+    const scaleX = video.videoWidth  / displayW;
+    const scaleY = video.videoHeight / displayH;
+
+    const cropX = (frameLeft - offsetX) * scaleX;
+    const cropY = (frameTop  - offsetY) * scaleY;
+    const cropW = frameW * scaleX;
+    const cropH = frameH * scaleY;
+
     const canvas = document.createElement("canvas");
-    canvas.width  = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d")!.drawImage(video, 0, 0);
+    canvas.width  = Math.max(1, cropW);
+    canvas.height = Math.max(1, cropH);
+    canvas.getContext("2d")!.drawImage(
+      video,
+      cropX, cropY, cropW, cropH,
+      0, 0, canvas.width, canvas.height,
+    );
+
     canvas.toBlob((blob) => {
       if (!blob) return;
       streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -196,7 +240,7 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
     else onClose();
   }, [onCapture, onClose]);
 
-  // ─── Fallback UI (Chrome iOS / ไม่รองรับ getUserMedia) ───────────────────
+  // ─── Fallback UI ──────────────────────────────────────────────────────────
   if (useInputFallback) {
     return (
       <>
@@ -222,7 +266,7 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
             <div>
               <p className="font-semibold">ถ่ายรูปมิเตอร์</p>
               <p className="text-xs text-muted-foreground mt-1">
-                วางมิเตอร์ให้อยู่ในกรอบก่อนถ่าย
+                วางตัวเลขมิเตอร์ให้อยู่กึ่งกลางภาพ
               </p>
             </div>
             <div className="flex gap-2">
@@ -240,19 +284,21 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
     );
   }
 
-  // ─── getUserMedia UI (Safari / Desktop) ──────────────────────────────────
+  // ─── getUserMedia UI ──────────────────────────────────────────────────────
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
+      {/* Top bar */}
       <div className="flex items-center justify-between px-4 pt-4 pb-2">
         <button onClick={handleClose}
           className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center">
           <X className="w-5 h-5 text-white" />
         </button>
-        <p className="text-white text-sm font-medium">วางมิเตอร์ในกรอบ</p>
+        <p className="text-white text-sm font-medium">วางมิเตอร์ในกรอบแล้วถ่าย</p>
         <div className="w-10" />
       </div>
 
-      <div className="relative flex-1 overflow-hidden">
+      {/* Video + Viewfinder overlay */}
+      <div ref={containerRef} className="relative flex-1 overflow-hidden">
         {permissionError ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 px-8 text-center">
             <Camera className="w-12 h-12 text-white/40" />
@@ -264,18 +310,31 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
           </div>
         ) : (
           <>
-            <video ref={videoRef} autoPlay playsInline muted
-              className="absolute inset-0 w-full h-full object-cover" />
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+
+            {/* กรอบ viewfinder บน live video */}
             {ready && <ViewfinderOverlay />}
+
             {!ready && (
               <div className="absolute inset-0 flex items-center justify-center">
                 <Loader2 className="w-8 h-8 text-white animate-spin" />
               </div>
             )}
+
+            {/* hint ด้านล่างกรอบ */}
             {ready && (
-              <div className="absolute bottom-4 left-0 right-0 flex justify-center pointer-events-none">
+              <div
+                className="absolute left-0 right-0 flex justify-center pointer-events-none"
+                style={{ top: `${((1 - FRAME_H_RATIO) / 2 + FRAME_H_RATIO) * 100 + 2}%` }}
+              >
                 <span className="bg-black/60 text-white text-xs px-3 py-1 rounded-full">
-                  วางตัวเลขมิเตอร์ให้อยู่ในกรอบสีส้ม
+                  วางตัวเลขมิเตอร์ให้อยู่ในกรอบ แล้วกดถ่าย
                 </span>
               </div>
             )}
@@ -283,12 +342,16 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
         )}
       </div>
 
+      {/* ปุ่มถ่าย */}
       {!permissionError && (
-        <div className="flex items-center justify-center py-8">
-          <button onClick={handleCapture} disabled={!ready}
+        <div className="flex items-center justify-center py-8 bg-black">
+          <button
+            onClick={handleCapture}
+            disabled={!ready}
             className="rounded-full border-4 border-white flex items-center justify-center
                        disabled:opacity-40 active:scale-95 transition-transform"
-            style={{ width: 72, height: 72 }}>
+            style={{ width: 72, height: 72 }}
+          >
             <div className="w-14 h-14 rounded-full bg-white" />
           </button>
         </div>
@@ -464,15 +527,14 @@ function ViewfinderPicker({ imagePreview, onImageReady, onRemove }: ViewfinderPr
   }, [imagePreview, onImageReady]);
 
   const processFile = useCallback(async (file: File) => {
-    if (!file.type.startsWith("image/")) return;
-    const reader = new FileReader();
-    reader.onload = async (evt) => {
-      const original = evt.target?.result as string;
-      // แสดงรูปก่อน ให้ user จัดตำแหน่ง แล้วค่อย crop เมื่อกด confirm
-      onImageReady("__pending__", original);
-    };
-    reader.readAsDataURL(file);
-  }, [onImageReady]);
+  if (!file.type.startsWith("image/")) return;
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    const original = evt.target?.result as string;
+    onImageReady("__pending__", original); // รอ user กด ✓
+  };
+  reader.readAsDataURL(file);
+}, [onImageReady]);
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -481,9 +543,15 @@ function ViewfinderPicker({ imagePreview, onImageReady, onRemove }: ViewfinderPr
   }, [processFile]);
 
   const handleCameraCapture = useCallback((file: File) => {
-    setShowCamera(false);
-    processFile(file);
-  }, [processFile]);
+  setShowCamera(false);
+  // file จากกล้องถูก crop แล้ว → แปลงเป็น dataUrl แล้วส่งตรง
+  const reader = new FileReader();
+  reader.onload = (evt) => {
+    const cropped = evt.target?.result as string;
+    onImageReady(cropped, cropped); // cropped !== "__pending__" → OCR เลย
+  };
+  reader.readAsDataURL(file);
+}, [onImageReady]);
 
   const vPad = `${(1 - FRAME_H_RATIO) / 2 * 100}%`;
   const hPad = `${(1 - FRAME_W_RATIO) / 2 * 100}%`;
@@ -649,16 +717,17 @@ function ScanForm() {
 
   // ViewfinderPicker เรียก onImageReady เมื่อ user กด ✓
   const handleImageReady = useCallback((cropped: string, original: string) => {
-    if (cropped === "__pending__") {
-      // รูปเพิ่งถูกโหลด ยังรอ user จัดตำแหน่ง
-      setImageOriginal(original);
-      setCroppedDataUrl(null);
-      return;
-    }
+  if (cropped === "__pending__") {
+    // มาจาก gallery → รอ user จัดตำแหน่งก่อน
     setImageOriginal(original);
-    setCroppedDataUrl(cropped);
-    runOcr(cropped);
-  }, [runOcr]);
+    setCroppedDataUrl(null);
+    return;
+  }
+  // มาจากกล้อง → crop แล้ว ส่ง OCR เลย
+  setImageOriginal(original);
+  setCroppedDataUrl(cropped);
+  runOcr(cropped);
+}, [runOcr]);
 
   const handleRemoveImage = useCallback(() => {
     setImageOriginal(null);
