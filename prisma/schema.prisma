@@ -1,0 +1,25 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Room {
+  id        String          @id @default(uuid())
+  name      String
+  createdAt DateTime        @default(now())
+  readings  MeterReading[]
+}
+
+model MeterReading {
+  id        String   @id @default(uuid())
+  roomId    String
+  value     Int
+  imageUrl  String?
+  createdAt DateTime @default(now())
+
+  room Room @relation(fields: [roomId], references: [id])
+}
