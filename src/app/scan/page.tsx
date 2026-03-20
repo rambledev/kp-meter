@@ -316,9 +316,13 @@ function OcrConfirmModal({
   useEffect(() => { if (ocrValue !== null) setEditValue(ocrValue.toString()); }, [ocrValue]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 flex items-end justify-center">
+    // bottom-16 = 64px = ความสูง BottomNav
+    <div className="fixed inset-x-0 bottom-16 z-40 flex items-end justify-center">
       <div className="bg-background w-full max-w-lg rounded-t-3xl p-5 space-y-4
+                      shadow-[0_-4px_24px_rgba(0,0,0,0.12)]
                       animate-in slide-in-from-bottom duration-300">
+
+        {/* รูป crop */}
         <div className="rounded-xl overflow-hidden border border-border">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={croppedImage} alt="cropped meter" className="w-full h-32 object-cover" />
