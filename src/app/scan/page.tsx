@@ -24,38 +24,7 @@ type OcrState = "idle" | "reading" | "confirm" | "error";
 const FRAME_W_RATIO = 0.85;
 const FRAME_H_RATIO = 0.38;
 
-// ─── Crop รูปเฉพาะในกรอบ viewfinder ─────────────────────────────────────────
-function cropToViewfinder(
-  imageDataUrl: string,
-  containerW: number,
-  containerH: number,
-  frameW: number,
-  frameH: number
-): Promise<string> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const scaleX = img.naturalWidth / containerW;
-      const scaleY = img.naturalHeight / containerH;
-      const offsetX = (containerW - frameW) / 2;
-      const offsetY = (containerH - frameH) / 2;
-      const canvas = document.createElement("canvas");
-      canvas.width = frameW * scaleX;
-      canvas.height = frameH * scaleY;
-      const ctx = canvas.getContext("2d")!;
-      ctx.drawImage(
-        img,
-        offsetX * scaleX, offsetY * scaleY,
-        frameW * scaleX, frameH * scaleY,
-        0, 0, canvas.width, canvas.height
-      );
-      resolve(canvas.toDataURL("image/jpeg", 0.92));
-    };
-    img.src = imageDataUrl;
-  });
-}
-
-// ─── ViewfinderFrame (มุมสีส้ม) ──────────────────────────────────────────────
+// ─── ViewfinderFrame ──────────────────────────────────────────────────────────
 function ViewfinderFrame({ wRatio, hRatio }: { wRatio: number; hRatio: number }) {
   const left = `${(1 - wRatio) / 2 * 100}%`;
   const top  = `${(1 - hRatio) / 2 * 100}%`;
@@ -74,7 +43,7 @@ function ViewfinderFrame({ wRatio, hRatio }: { wRatio: number; hRatio: number })
   );
 }
 
-// ─── Overlay มืด 4 ด้าน ───────────────────────────────────────────────────────
+// ─── ViewfinderOverlay ────────────────────────────────────────────────────────
 function ViewfinderOverlay() {
   const vPad = `${(1 - FRAME_H_RATIO) / 2 * 100}%`;
   const hPad = `${(1 - FRAME_W_RATIO) / 2 * 100}%`;
@@ -89,21 +58,77 @@ function ViewfinderOverlay() {
   );
 }
 
-// ─── Camera Modal (getUserMedia) ──────────────────────────────────────────────
+// ─── crop รูปตาม transform ────────────────────────────────────────────────────
+function cropImageWithTransform(
+  original: string,
+  containerW: number,
+  containerH: number,
+  scale: number,
+  offsetX: number,
+  offsetY: number,
+): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      // ขนาดรูปที่แสดงบน container หลัง transform
+      const displayW = containerW * scale;
+      const displayH = containerH * scale;
+      const imgLeft  = (containerW - displayW) / 2 + offsetX;
+      const imgTop   = (containerH - displayH) / 2 + offsetY;
+
+      // ตำแหน่งกรอบ viewfinder บน container
+      const frameW = containerW * FRAME_W_RATIO;
+      const frameH = containerH * FRAME_H_RATIO;
+      const frameLeft = (containerW - frameW) / 2;
+      const frameTop  = (containerH - frameH) / 2;
+
+      // แปลงพิกัดกรอบ → พิกัดบนรูปจริง
+      const scaleToNatural = img.naturalWidth / displayW;
+      const cropX = (frameLeft - imgLeft) * scaleToNatural;
+      const cropY = (frameTop  - imgTop)  * scaleToNatural;
+      const cropW = frameW * scaleToNatural;
+      const cropH = frameH * scaleToNatural;
+
+      const canvas = document.createElement("canvas");
+      canvas.width  = Math.max(1, cropW);
+      canvas.height = Math.max(1, cropH);
+      canvas.getContext("2d")!.drawImage(
+        img, cropX, cropY, cropW, cropH,
+        0, 0, canvas.width, canvas.height,
+      );
+      resolve(canvas.toDataURL("image/jpeg", 0.92));
+    };
+    img.src = original;
+  });
+}
+
+// ─── Camera Modal ─────────────────────────────────────────────────────────────
+// Strategy: getUserMedia ก่อน ถ้าไม่รองรับ (Chrome iOS) → fallback input[capture]
 interface CameraModalProps {
   onCapture: (file: File) => void;
   onClose: () => void;
 }
 
 function CameraModal({ onCapture, onClose }: CameraModalProps) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const [ready, setReady] = useState(false);
+  const videoRef     = useRef<HTMLVideoElement>(null);
+  const streamRef    = useRef<MediaStream | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [ready, setReady]                   = useState(false);
   const [permissionError, setPermissionError] = useState("");
+  const [useInputFallback, setUseInputFallback] = useState(false);
 
   useEffect(() => {
-    let active = true;
+    // Chrome iOS ไม่รองรับ getUserMedia → fallback ทันที
+    const supported =
+      typeof navigator !== "undefined" &&
+      !!navigator.mediaDevices?.getUserMedia;
 
+    if (!supported) {
+      setUseInputFallback(true);
+      return;
+    }
+
+    let active = true;
     async function startCamera() {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
@@ -120,15 +145,17 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
         if (!active) return;
         const e = err as DOMException;
         if (e.name === "NotAllowedError" || e.name === "PermissionDeniedError") {
-          setPermissionError("ไม่ได้รับอนุญาตให้ใช้กล้อง\nกรุณาอนุญาตในการตั้งค่าเบราว์เซอร์");
-        } else if (e.name === "NotFoundError") {
-          setPermissionError("ไม่พบกล้องในอุปกรณ์นี้");
+          setPermissionError(
+            "ไม่ได้รับอนุญาตให้ใช้กล้อง\n\n" +
+            "หากใช้ Chrome บน iPhone กรุณาเปิดด้วย Safari\n" +
+            "หรือกดปุ่ม 'เลือกรูปจากคลัง' แทน"
+          );
         } else {
-          setPermissionError("เปิดกล้องไม่ได้: " + e.message);
+          // NotFoundError หรือ error อื่น → fallback
+          setUseInputFallback(true);
         }
       }
     }
-
     startCamera();
     return () => {
       active = false;
@@ -136,18 +163,25 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
     };
   }, []);
 
+  // เปิด input อัตโนมัติเมื่อ fallback พร้อม
+  useEffect(() => {
+    if (useInputFallback) {
+      const t = setTimeout(() => fileInputRef.current?.click(), 150);
+      return () => clearTimeout(t);
+    }
+  }, [useInputFallback]);
+
   const handleCapture = useCallback(() => {
     const video = videoRef.current;
     if (!video || !ready) return;
     const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
+    canvas.width  = video.videoWidth;
     canvas.height = video.videoHeight;
     canvas.getContext("2d")!.drawImage(video, 0, 0);
     canvas.toBlob((blob) => {
       if (!blob) return;
-      const file = new File([blob], `meter-${Date.now()}.jpg`, { type: "image/jpeg" });
       streamRef.current?.getTracks().forEach((t) => t.stop());
-      onCapture(file);
+      onCapture(new File([blob], `meter-${Date.now()}.jpg`, { type: "image/jpeg" }));
     }, "image/jpeg", 0.92);
   }, [ready, onCapture]);
 
@@ -156,54 +190,88 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
     onClose();
   }, [onClose]);
 
+  const handleFallbackChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) onCapture(file);
+    else onClose();
+  }, [onCapture, onClose]);
+
+  // ─── Fallback UI (Chrome iOS / ไม่รองรับ getUserMedia) ───────────────────
+  if (useInputFallback) {
+    return (
+      <>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={handleFallbackChange}
+        />
+        <div
+          className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+          onClick={onClose}
+        >
+          <div
+            className="bg-background rounded-2xl p-6 w-full max-w-xs text-center space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-14 h-14 rounded-full bg-primary/10 flex items-center justify-center mx-auto">
+              <Camera className="w-7 h-7 text-primary" />
+            </div>
+            <div>
+              <p className="font-semibold">ถ่ายรูปมิเตอร์</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                วางมิเตอร์ให้อยู่ในกรอบก่อนถ่าย
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" className="flex-1" onClick={onClose}>
+                ยกเลิก
+              </Button>
+              <Button size="sm" className="flex-1 gap-1.5"
+                onClick={() => fileInputRef.current?.click()}>
+                <Camera className="w-3.5 h-3.5" /> เปิดกล้อง
+              </Button>
+            </div>
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  // ─── getUserMedia UI (Safari / Desktop) ──────────────────────────────────
   return (
     <div className="fixed inset-0 z-50 bg-black flex flex-col">
-      {/* Top bar */}
-      <div className="flex items-center justify-between px-4 pt-4 pb-2 z-10">
-        <button
-          onClick={handleClose}
-          className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center"
-        >
+      <div className="flex items-center justify-between px-4 pt-4 pb-2">
+        <button onClick={handleClose}
+          className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center">
           <X className="w-5 h-5 text-white" />
         </button>
         <p className="text-white text-sm font-medium">วางมิเตอร์ในกรอบ</p>
         <div className="w-10" />
       </div>
 
-      {/* Video area */}
       <div className="relative flex-1 overflow-hidden">
         {permissionError ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 px-8 text-center">
-            <div className="w-16 h-16 rounded-full bg-white/10 flex items-center justify-center">
-              <Camera className="w-8 h-8 text-white/60" />
-            </div>
+            <Camera className="w-12 h-12 text-white/40" />
             <p className="text-white/80 text-sm whitespace-pre-line">{permissionError}</p>
-            <p className="text-white/50 text-xs">
-              ไปที่ Settings → Privacy → Camera → อนุญาตเบราว์เซอร์
-            </p>
-            <Button
-              variant="outline" size="sm" onClick={handleClose}
-              className="border-white/30 text-white hover:bg-white/10"
-            >
+            <Button variant="outline" size="sm" onClick={handleClose}
+              className="border-white/30 text-white hover:bg-white/10">
               ปิด
             </Button>
           </div>
         ) : (
           <>
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="absolute inset-0 w-full h-full object-cover"
-            />
+            <video ref={videoRef} autoPlay playsInline muted
+              className="absolute inset-0 w-full h-full object-cover" />
             {ready && <ViewfinderOverlay />}
             {!ready && (
               <div className="absolute inset-0 flex items-center justify-center">
                 <Loader2 className="w-8 h-8 text-white animate-spin" />
               </div>
             )}
-            {/* hint */}
             {ready && (
               <div className="absolute bottom-4 left-0 right-0 flex justify-center pointer-events-none">
                 <span className="bg-black/60 text-white text-xs px-3 py-1 rounded-full">
@@ -215,16 +283,12 @@ function CameraModal({ onCapture, onClose }: CameraModalProps) {
         )}
       </div>
 
-      {/* ปุ่มถ่าย */}
       {!permissionError && (
         <div className="flex items-center justify-center py-8">
-          <button
-            onClick={handleCapture}
-            disabled={!ready}
+          <button onClick={handleCapture} disabled={!ready}
             className="rounded-full border-4 border-white flex items-center justify-center
                        disabled:opacity-40 active:scale-95 transition-transform"
-            style={{ width: 72, height: 72 }}
-          >
+            style={{ width: 72, height: 72 }}>
             <div className="w-14 h-14 rounded-full bg-white" />
           </button>
         </div>
@@ -249,23 +313,17 @@ function OcrConfirmModal({
   onConfirm, onRetake, onRetry,
 }: OcrConfirmProps) {
   const [editValue, setEditValue] = useState(ocrValue?.toString() ?? "");
-
-  useEffect(() => {
-    if (ocrValue !== null) setEditValue(ocrValue.toString());
-  }, [ocrValue]);
+  useEffect(() => { if (ocrValue !== null) setEditValue(ocrValue.toString()); }, [ocrValue]);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/70 flex items-end justify-center">
       <div className="bg-background w-full max-w-lg rounded-t-3xl p-5 space-y-4
                       animate-in slide-in-from-bottom duration-300">
-
-        {/* รูป crop */}
         <div className="rounded-xl overflow-hidden border border-border">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={croppedImage} alt="cropped meter" className="w-full h-32 object-cover" />
         </div>
 
-        {/* Loading */}
         {ocrState === "reading" && (
           <div className="flex flex-col items-center gap-3 py-4">
             <Loader2 className="w-8 h-8 text-primary animate-spin" />
@@ -273,7 +331,6 @@ function OcrConfirmModal({
           </div>
         )}
 
-        {/* Error */}
         {ocrState === "error" && (
           <div className="space-y-3">
             <div className="flex items-center gap-2 text-destructive bg-destructive/10 rounded-xl px-4 py-3">
@@ -291,7 +348,6 @@ function OcrConfirmModal({
           </div>
         )}
 
-        {/* Confirm */}
         {ocrState === "confirm" && (
           <div className="space-y-4">
             <div>
@@ -312,11 +368,9 @@ function OcrConfirmModal({
               <Button variant="outline" size="lg" className="flex-1 gap-2" onClick={onRetake}>
                 <RefreshCw className="w-4 h-4" /> ถ่ายใหม่
               </Button>
-              <Button
-                size="lg" className="flex-1 gap-2"
+              <Button size="lg" className="flex-1 gap-2"
                 onClick={() => { const n = parseFloat(editValue); if (!isNaN(n)) onConfirm(n); }}
-                disabled={isNaN(parseFloat(editValue))}
-              >
+                disabled={isNaN(parseFloat(editValue))}>
                 <CheckCircle2 className="w-4 h-4" /> ยืนยัน
               </Button>
             </div>
@@ -327,7 +381,7 @@ function OcrConfirmModal({
   );
 }
 
-// ─── Viewfinder Picker ────────────────────────────────────────────────────────
+// ─── Viewfinder Picker (pinch zoom + pan, กรอบอยู่กับที่) ────────────────────
 interface ViewfinderProps {
   imagePreview: string | null;
   onImageReady: (cropped: string, original: string) => void;
@@ -339,20 +393,79 @@ function ViewfinderPicker({ imagePreview, onImageReady, onRemove }: ViewfinderPr
   const containerRef = useRef<HTMLDivElement>(null);
   const [showCamera, setShowCamera] = useState(false);
 
+  // transform state
+  const [scale, setScale]   = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+
+  // refs สำหรับ touch (ไม่ trigger re-render)
+  const lastTouchRef = useRef<{ x: number; y: number } | null>(null);
+  const lastDistRef  = useRef<number | null>(null);
+  const scaleRef     = useRef(1);
+  const offsetRef    = useRef({ x: 0, y: 0 });
+
+  useEffect(() => { scaleRef.current = scale; }, [scale]);
+  useEffect(() => { offsetRef.current = offset; }, [offset]);
+
+  // reset transform เมื่อรูปเปลี่ยน
+  useEffect(() => {
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+  }, [imagePreview]);
+
+  const getDist = (touches: React.TouchList) => {
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  };
+
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    if (e.touches.length === 1) {
+      lastTouchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      lastDistRef.current  = null;
+    } else if (e.touches.length === 2) {
+      lastDistRef.current  = getDist(e.touches);
+      lastTouchRef.current = null;
+    }
+  }, []);
+
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    e.preventDefault();
+    if (e.touches.length === 1 && lastTouchRef.current) {
+      const dx = e.touches[0].clientX - lastTouchRef.current.x;
+      const dy = e.touches[0].clientY - lastTouchRef.current.y;
+      lastTouchRef.current = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      setOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }));
+    } else if (e.touches.length === 2 && lastDistRef.current !== null) {
+      const dist  = getDist(e.touches);
+      const delta = dist / lastDistRef.current;
+      lastDistRef.current = dist;
+      setScale((prev) => Math.min(Math.max(prev * delta, 1), 5));
+    }
+  }, []);
+
+  const handleTouchEnd = useCallback(() => {
+    lastTouchRef.current = null;
+    lastDistRef.current  = null;
+  }, []);
+
+  // กด "ยืนยัน crop" — crop ตาม transform ปัจจุบัน
+  const handleConfirmCrop = useCallback(async () => {
+    if (!imagePreview || !containerRef.current) return;
+    const cW = containerRef.current.clientWidth;
+    const cH = containerRef.current.clientHeight;
+    const cropped = await cropImageWithTransform(
+      imagePreview, cW, cH, scaleRef.current, offsetRef.current.x, offsetRef.current.y,
+    );
+    onImageReady(cropped, imagePreview);
+  }, [imagePreview, onImageReady]);
+
   const processFile = useCallback(async (file: File) => {
     if (!file.type.startsWith("image/")) return;
     const reader = new FileReader();
     reader.onload = async (evt) => {
       const original = evt.target?.result as string;
-      const container = containerRef.current;
-      if (!container) { onImageReady(original, original); return; }
-      const cW = container.clientWidth;
-      const cH = container.clientHeight;
-      const cropped = await cropToViewfinder(
-        original, cW, cH,
-        cW * FRAME_W_RATIO, cH * FRAME_H_RATIO
-      );
-      onImageReady(cropped, original);
+      // แสดงรูปก่อน ให้ user จัดตำแหน่ง แล้วค่อย crop เมื่อกด confirm
+      onImageReady("__pending__", original);
     };
     reader.readAsDataURL(file);
   }, [onImageReady]);
@@ -371,18 +484,43 @@ function ViewfinderPicker({ imagePreview, onImageReady, onRemove }: ViewfinderPr
   const vPad = `${(1 - FRAME_H_RATIO) / 2 * 100}%`;
   const hPad = `${(1 - FRAME_W_RATIO) / 2 * 100}%`;
 
+  // imagePreview === "__pending__" หมายถึงยังรอ original จาก parent
+  // ใช้ originalPreview แยกสำหรับแสดง
+  const showImage = imagePreview && imagePreview !== "__pending__";
+
   return (
     <>
       <div className="space-y-2">
         <div
           ref={containerRef}
-          className="relative w-full rounded-2xl overflow-hidden bg-gray-900"
+          className="relative w-full rounded-2xl overflow-hidden bg-gray-900 select-none"
           style={{ height: 220 }}
+          onTouchStart={showImage ? handleTouchStart : undefined}
+          onTouchMove={showImage ? handleTouchMove : undefined}
+          onTouchEnd={showImage ? handleTouchEnd : undefined}
         >
-          {imagePreview ? (
+          {showImage ? (
             <>
+              {/* รูปที่ transform ได้ */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={imagePreview} alt="meter" className="w-full h-full object-cover" />
+              <img
+                src={imagePreview}
+                alt="meter"
+                draggable={false}
+                style={{
+                  position: "absolute",
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+                  transformOrigin: "center center",
+                  transition: "none",
+                  userSelect: "none",
+                  touchAction: "none",
+                }}
+              />
+
+              {/* overlay + กรอบ (อยู่กับที่เสมอ) */}
               <div className="absolute inset-0 pointer-events-none">
                 <div className="absolute top-0 left-0 right-0 bg-black/50" style={{ height: vPad }} />
                 <div className="absolute bottom-0 left-0 right-0 bg-black/50" style={{ height: vPad }} />
@@ -390,18 +528,25 @@ function ViewfinderPicker({ imagePreview, onImageReady, onRemove }: ViewfinderPr
                 <div className="absolute bg-black/50" style={{ top: vPad, bottom: vPad, right: 0, width: hPad }} />
                 <ViewfinderFrame wRatio={FRAME_W_RATIO} hRatio={FRAME_H_RATIO} />
               </div>
-              <button
-                onClick={onRemove}
-                className="absolute top-2 right-2 w-8 h-8 rounded-full bg-black/60
-                           flex items-center justify-center z-10"
-              >
-                <X className="w-4 h-4 text-white" />
-              </button>
-              <div className="absolute bottom-2 left-0 right-0 flex justify-center z-10 pointer-events-none">
-                <span className="bg-black/60 text-white text-xs px-3 py-1 rounded-full">
-                  วางมิเตอร์ให้อยู่ในกรอบสีส้ม
+
+              {/* hint */}
+              <div className="absolute bottom-2 left-0 right-0 flex justify-center pointer-events-none">
+                <span className="bg-black/60 text-white text-xs px-2 py-0.5 rounded-full">
+                  ลากเลื่อน / Pinch ย่อขยาย → กด ✓ เพื่อยืนยัน
                 </span>
               </div>
+
+              {/* ปุ่ม X และ ✓ */}
+              <button onClick={onRemove}
+                className="absolute top-2 right-2 w-8 h-8 rounded-full bg-black/60
+                           flex items-center justify-center z-10">
+                <X className="w-4 h-4 text-white" />
+              </button>
+              <button onClick={handleConfirmCrop}
+                className="absolute top-2 left-2 w-8 h-8 rounded-full bg-primary
+                           flex items-center justify-center z-10">
+                <CheckCircle2 className="w-4 h-4 text-white" />
+              </button>
             </>
           ) : (
             <>
@@ -455,23 +600,23 @@ function ScanForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
-  const [step, setStep] = useState<Step>("form");
+  const [step, setStep]               = useState<Step>("form");
   const [selectedRoomId, setSelectedRoomId] = useState("");
-  const [meterValue, setMeterValue] = useState("");
-  const [note, setNote] = useState("");
-  const [imagePreview, setImagePreview] = useState<string | null>(null);
-  const [croppedDataUrl, setCroppedDataUrl] = useState<string | null>(null);
-  const [error, setError] = useState("");
+  const [meterValue, setMeterValue]   = useState("");
+  const [note, setNote]               = useState("");
+  const [imageOriginal, setImageOriginal] = useState<string | null>(null); // รูปเต็ม
+  const [croppedDataUrl, setCroppedDataUrl] = useState<string | null>(null); // รูป crop
+  const [error, setError]             = useState("");
   const [savedRecord, setSavedRecord] = useState<MeterRecord | null>(null);
 
-  const [ocrState, setOcrState] = useState<OcrState>("idle");
-  const [ocrValue, setOcrValue] = useState<number | null>(null);
-  const [ocrError, setOcrError] = useState("");
+  const [ocrState, setOcrState]   = useState<OcrState>("idle");
+  const [ocrValue, setOcrValue]   = useState<number | null>(null);
+  const [ocrError, setOcrError]   = useState("");
   const [showOcrModal, setShowOcrModal] = useState(false);
 
   useEffect(() => {
-    const roomParam = searchParams.get("room");
-    if (roomParam) setSelectedRoomId(roomParam);
+    const p = searchParams.get("room");
+    if (p) setSelectedRoomId(p);
   }, [searchParams]);
 
   const runOcr = useCallback(async (imageBase64: string) => {
@@ -479,7 +624,7 @@ function ScanForm() {
     setOcrError("");
     setShowOcrModal(true);
     try {
-      const res = await fetch("/api/ocr", {
+      const res  = await fetch("/api/ocr", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ imageBase64 }),
@@ -498,14 +643,21 @@ function ScanForm() {
     }
   }, []);
 
+  // ViewfinderPicker เรียก onImageReady เมื่อ user กด ✓
   const handleImageReady = useCallback((cropped: string, original: string) => {
-    setImagePreview(original);
+    if (cropped === "__pending__") {
+      // รูปเพิ่งถูกโหลด ยังรอ user จัดตำแหน่ง
+      setImageOriginal(original);
+      setCroppedDataUrl(null);
+      return;
+    }
+    setImageOriginal(original);
     setCroppedDataUrl(cropped);
     runOcr(cropped);
   }, [runOcr]);
 
   const handleRemoveImage = useCallback(() => {
-    setImagePreview(null);
+    setImageOriginal(null);
     setCroppedDataUrl(null);
     setOcrState("idle");
     setOcrValue(null);
@@ -519,7 +671,7 @@ function ScanForm() {
   }, []);
 
   const handleRetake = useCallback(() => {
-    setImagePreview(null);
+    setImageOriginal(null);
     setCroppedDataUrl(null);
     setOcrState("idle");
     setOcrValue(null);
@@ -540,7 +692,7 @@ function ScanForm() {
     const room = MOCK_ROOMS.find((r) => r.id === selectedRoomId);
     if (!room) return;
 
-    const latest = getLatestRecordByRoom(selectedRoomId);
+    const latest       = getLatestRecordByRoom(selectedRoomId);
     const previousValue = latest?.value ?? null;
     const units =
       previousValue !== null && numValue > previousValue
@@ -567,7 +719,7 @@ function ScanForm() {
     setSelectedRoomId("");
     setMeterValue("");
     setNote("");
-    setImagePreview(null);
+    setImageOriginal(null);
     setCroppedDataUrl(null);
     setOcrState("idle");
     setOcrValue(null);
@@ -579,19 +731,17 @@ function ScanForm() {
     return <SuccessScreen record={savedRecord} onReset={handleReset} onHome={() => router.push("/")} />;
   }
 
-  const selectedRoom = MOCK_ROOMS.find((r) => r.id === selectedRoomId);
-  const latestRecord = selectedRoomId ? getLatestRecordByRoom(selectedRoomId) : null;
-  const currentNum = parseFloat(meterValue);
+  const selectedRoom  = MOCK_ROOMS.find((r) => r.id === selectedRoomId);
+  const latestRecord  = selectedRoomId ? getLatestRecordByRoom(selectedRoomId) : null;
+  const currentNum    = parseFloat(meterValue);
 
   return (
     <>
       <div className="flex flex-col min-h-[calc(100vh-4rem)]">
         {/* Top bar */}
         <div className="flex items-center gap-3 px-4 pt-4 pb-3 border-b border-border/50">
-          <button
-            onClick={() => router.back()}
-            className="w-9 h-9 rounded-xl flex items-center justify-center hover:bg-accent transition-colors"
-          >
+          <button onClick={() => router.back()}
+            className="w-9 h-9 rounded-xl flex items-center justify-center hover:bg-accent transition-colors">
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div>
@@ -641,7 +791,7 @@ function ScanForm() {
               <span className="text-muted-foreground font-normal text-xs">(ไม่บังคับ)</span>
             </Label>
             <ViewfinderPicker
-              imagePreview={imagePreview}
+              imagePreview={imageOriginal}
               onImageReady={handleImageReady}
               onRemove={handleRemoveImage}
             />
@@ -712,11 +862,8 @@ function ScanForm() {
           )}
 
           <div className="mt-auto pt-2">
-            <Button
-              size="xl"
-              className="w-full gap-2 shadow-lg shadow-primary/25"
-              onClick={handleSubmit}
-            >
+            <Button size="xl" className="w-full gap-2 shadow-lg shadow-primary/25"
+              onClick={handleSubmit}>
               <CheckCircle2 className="w-5 h-5" />
               ยืนยันบันทึก
             </Button>
@@ -724,7 +871,6 @@ function ScanForm() {
         </div>
       </div>
 
-      {/* OCR Modal */}
       {showOcrModal && croppedDataUrl && (
         <OcrConfirmModal
           croppedImage={croppedDataUrl}
@@ -775,15 +921,11 @@ function SuccessScreen({ record, onReset, onHome }: SuccessScreenProps) {
       </div>
       <div className="w-full bg-card border border-border rounded-2xl p-5 space-y-3 text-left shadow-sm">
         <SummaryRow label="ห้อง" value={record.roomName} />
-        <SummaryRow
-          label="เลขมิเตอร์"
-          value={<span className="font-mono font-bold text-lg">{record.value.toLocaleString()}</span>}
-        />
+        <SummaryRow label="เลขมิเตอร์"
+          value={<span className="font-mono font-bold text-lg">{record.value.toLocaleString()}</span>} />
         {record.units !== null && (
-          <SummaryRow
-            label="ใช้ไป"
-            value={<span className="font-semibold text-emerald-600">{record.units} หน่วย</span>}
-          />
+          <SummaryRow label="ใช้ไป"
+            value={<span className="font-semibold text-emerald-600">{record.units} หน่วย</span>} />
         )}
         {record.note && <SummaryRow label="หมายเหตุ" value={record.note} />}
       </div>
