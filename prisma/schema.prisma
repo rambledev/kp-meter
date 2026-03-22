@@ -8,18 +8,48 @@ datasource db {
 }
 
 model Room {
-  id        String          @id @default(uuid())
+  id        String        @id
   name      String
-  createdAt DateTime        @default(now())
-  readings  MeterReading[]
+  floor     String
+  building  String        @default("A")
+  records   MeterRecord[]
+  createdAt DateTime      @default(now())
+
+  @@map("rooms")
 }
 
-model MeterReading {
-  id        String   @id @default(uuid())
-  roomId    String
-  value     Int
-  imageUrl  String?
-  createdAt DateTime @default(now())
+model MeterRecord {
+  id            String    @id @default(cuid())
+  roomId        String
+  room          Room      @relation(fields: [roomId], references: [id])
+  type          MeterType @default(ELECTRIC)
+  value         Float
+  previousValue Float?
+  units         Float?
+  imageUrl      String?
+  note          String    @default("")
+  recordedAt    DateTime  @default(now())
+  month         Int
+  year          Int
 
-  room Room @relation(fields: [roomId], references: [id])
+  @@index([roomId, type])
+  @@index([year, month])
+  @@map("meter_records")
+}
+
+enum MeterType {
+  ELECTRIC
+  WATER
+}
+
+model Settings {
+  id           Int      @id @default(1)
+  hotelName    String   @default("หอพัก")
+  address      String   @default("")
+  phone        String   @default("")
+  electricRate Float    @default(8.0)
+  waterRate    Float    @default(18.0)
+  updatedAt    DateTime @updatedAt
+
+  @@map("settings")
 }

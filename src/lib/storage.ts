@@ -1,61 +1,65 @@
-import type { Room, MeterRecord } from "@/types";
+import type { RoomWithLatest, MeterRecord } from "@/types";
 
-export const MOCK_ROOMS: Room[] = [
-  { id: "A101", name: "A101", floor: "ชั้น 1" },
-  { id: "A102", name: "A102", floor: "ชั้น 1" },
-  { id: "A103", name: "A103", floor: "ชั้น 1" },
-  { id: "A201", name: "A201", floor: "ชั้น 2" },
-  { id: "A202", name: "A202", floor: "ชั้น 2" },
-  { id: "A203", name: "A203", floor: "ชั้น 2" },
-  { id: "B101", name: "B101", floor: "ชั้น 1" },
-  { id: "B102", name: "B102", floor: "ชั้น 1" },
-  { id: "B201", name: "B201", floor: "ชั้น 2" },
-  { id: "B202", name: "B202", floor: "ชั้น 2" },
-];
+// ─── Rooms ────────────────────────────────────────────────────────────────────
 
-const STORAGE_KEY = "kp-meter-records";
+export async function getRooms(): Promise<RoomWithLatest[]> {
+  const res = await fetch("/api/rooms", { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to fetch rooms");
+  return res.json();
+}
 
-export function getRecords(): MeterRecord[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return [];
-    return JSON.parse(raw) as MeterRecord[];
-  } catch {
-    return [];
+// ─── Records ──────────────────────────────────────────────────────────────────
+
+export async function getRecords(params?: {
+  roomId?: string;
+  search?: string;
+}): Promise<MeterRecord[]> {
+  const qs = new URLSearchParams();
+  if (params?.roomId) qs.set("roomId", params.roomId);
+  if (params?.search)  qs.set("search",  params.search);
+  const url = `/api/records${qs.toString() ? `?${qs}` : ""}`;
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to fetch records");
+  return res.json();
+}
+
+export async function saveRecord(data: {
+  roomId: string;
+  type: "ELECTRIC" | "WATER";
+  value: number;
+  imageUrl: string | null;
+  note: string;
+  month: number;
+  year: number;
+}): Promise<MeterRecord> {
+  const res = await fetch("/api/records", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as { error?: string };
+    throw new Error(err.error ?? "Failed to save record");
   }
+  return res.json();
 }
 
-export function saveRecord(record: MeterRecord): void {
-  const records = getRecords();
-  records.unshift(record);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
+export async function deleteRecord(id: string): Promise<void> {
+  const res = await fetch(`/api/records/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to delete record");
 }
 
-export function getLatestRecordByRoom(roomId: string): MeterRecord | null {
-  const records = getRecords();
-  return records.find((r) => r.roomId === roomId) ?? null;
-}
-
-export function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-}
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 export function formatDate(isoString: string): string {
   const d = new Date(isoString);
   return d.toLocaleDateString("th-TH", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
+    year: "numeric", month: "short", day: "numeric",
+    hour: "2-digit", minute: "2-digit",
   });
 }
 
 export function formatShortDate(isoString: string): string {
   const d = new Date(isoString);
-  return d.toLocaleDateString("th-TH", {
-    month: "short",
-    day: "numeric",
-  });
+  return d.toLocaleDateString("th-TH", { month: "short", day: "numeric" });
 }
